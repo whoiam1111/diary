@@ -23,7 +23,7 @@ export async function POST(req: Request) {
         // [1] 코치 가입 처리
         // ───────────────────────────────────────────
         if (role === 'coach') {
-            const serverCoachSecret = process.env.COACH_SIGNUP_SECRET || 'coach_master_2026!';
+            const serverCoachSecret = process.env.COACH_SIGNUP_SECRET || 'coach_master_144000!';
             if (coachSecret?.trim() !== serverCoachSecret) {
                 return NextResponse.json({ message: '코치 가입 인증키가 올바르지 않습니다.' }, { status: 403 });
             }
