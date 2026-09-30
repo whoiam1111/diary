@@ -2,17 +2,24 @@
 import { Pool } from 'pg';
 
 declare global {
-    // 개발 및 서버리스 재실행 시 커넥션 누수 방지
     var cachedPool: Pool | undefined;
+}
+
+let connectionString = process.env.DATABASE_URL || process.env.DATABASE_URL_UNPOOLED || process.env.POSTGRES_URL || '';
+
+// Neon DB 필수: sslmode=require 옵션 자동 보정
+if (connectionString && !connectionString.includes('sslmode=')) {
+    connectionString += (connectionString.includes('?') ? '&' : '?') + 'sslmode=require';
 }
 
 const pool =
     globalThis.cachedPool ||
     new Pool({
-        connectionString: process.env.DATABASE_URL,
-        // 클라우드 DB(Neon/Supabase) 연결을 위한 SSL 활성화
-        ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : undefined,
-        max: 3, // 서버리스 인스턴스당 커넥션 최대 수 제한
+        connectionString,
+        ssl: {
+            rejectUnauthorized: false, // SSL 인증서 허용
+        },
+        max: 3,
         idleTimeoutMillis: 30000,
         connectionTimeoutMillis: 10000,
     });

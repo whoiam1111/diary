@@ -3,13 +3,20 @@
 import React, { useState, useEffect } from 'react';
 import { JournalEntry, INITIAL_JOURNAL } from '@/types/journal';
 
+interface ClientItem {
+    id: string;
+    name: string;
+    username: string;
+    journal_count: number;
+    last_journal_date: string | null;
+}
+
 export default function MindJournalApp() {
     const [user, setUser] = useState<{ userId: string; username: string; name: string; role: string } | null>(null);
     const [loading, setLoading] = useState(true);
 
     // 인증 상태 ('login' | 'register')
     const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
-    // 가입 유형 ('client' | 'coach')
     const [registerRole, setRegisterRole] = useState<'client' | 'coach'>('client');
     const [form, setForm] = useState({
         username: '',
@@ -25,27 +32,43 @@ export default function MindJournalApp() {
     const [currentDate, setCurrentDate] = useState<string>(todayStr);
     const [journal, setJournal] = useState<JournalEntry>({ ...INITIAL_JOURNAL, date: todayStr });
     const [saveStatus, setSaveStatus] = useState<string>('저장됨');
+    const [isSaving, setIsSaving] = useState<boolean>(false);
+    const [showSaveToast, setShowSaveToast] = useState<boolean>(false);
 
-    // 코치 초대 코드 모달
+    // 코치 전용 상태: 초대 코드 모달 및 내담자 목록/선택
     const [showCoachModal, setShowCoachModal] = useState(false);
     const [codes, setCodes] = useState<any[]>([]);
+    const [clients, setClients] = useState<ClientItem[]>([]);
+    const [selectedClientId, setSelectedClientId] = useState<string>(''); // 빈값이면 코치 본인 일기
 
-    // 세션 확인
+    // 1. 세션 확인
     useEffect(() => {
         fetch('/api/auth/me')
             .then((res) => res.json())
             .then((data) => {
                 setUser(data.user);
                 setLoading(false);
+                if (data.user?.role === 'coach') {
+                    fetchClients();
+                }
             })
             .catch(() => setLoading(false));
     }, []);
 
-    // 날짜별 저널 로드
+    // 코치: 내담자 목록 로드
+    const fetchClients = () => {
+        fetch('/api/coach/clients')
+            .then((res) => res.json())
+            .then((d) => setClients(d.clients || []));
+    };
+
+    // 2. 날짜 또는 선택된 내담자 변경 시 저널 로드
     useEffect(() => {
         if (!user) return;
         setSaveStatus('불러오는 중...');
-        fetch(`/api/journals?date=${currentDate}`)
+
+        const clientQuery = selectedClientId ? `&clientId=${selectedClientId}` : '';
+        fetch(`/api/journals?date=${currentDate}${clientQuery}`)
             .then((res) => res.json())
             .then((data) => {
                 if (data.content) {
@@ -53,17 +76,18 @@ export default function MindJournalApp() {
                 } else {
                     setJournal({ ...INITIAL_JOURNAL, date: currentDate });
                 }
-                setSaveStatus('동기화 완료');
+                setSaveStatus(selectedClientId ? '내담자 저널 열람 중' : '동기화 완료');
             })
             .catch(() => setSaveStatus('로드 실패'));
-    }, [currentDate, user]);
+    }, [currentDate, selectedClientId, user]);
 
-    // 저널 필드 업데이트
     const updateField = (field: keyof JournalEntry, value: any) => {
+        if (selectedClientId) return; // 내담자 열람 중일 땐 수정 불가
         setJournal((prev) => ({ ...prev, [field]: value }));
     };
 
     const handleListChange = (field: 'gratitudes' | 'praises', index: number, value: string) => {
+        if (selectedClientId) return; // 내담자 열람 중일 땐 수정 불가
         setJournal((prev) => {
             const arr = [...prev[field]];
             arr[index] = value;
@@ -71,23 +95,51 @@ export default function MindJournalApp() {
         });
     };
 
-    // 자동 DB 저장 (디바운스 800ms)
-    useEffect(() => {
-        if (!user || loading) return;
+    // 수동 저장 (본인 일기일 때만 가능)
+    const handleManualSave = async () => {
+        if (!user || selectedClientId) return;
+        setIsSaving(true);
         setSaveStatus('저장 중...');
+        try {
+            const res = await fetch('/api/journals', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ date: currentDate, content: journal }),
+            });
+            if (res.ok) {
+                const time = new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' });
+                setSaveStatus(`DB 저장 완료 (${time})`);
+                setShowSaveToast(true);
+                setTimeout(() => setShowSaveToast(false), 2500);
+            } else {
+                setSaveStatus('저장 실패');
+            }
+        } catch {
+            setSaveStatus('저장 실패');
+        } finally {
+            setIsSaving(false);
+        }
+    };
+
+    // 자동 저장: 내담자 열람 중(`selectedClientId !== ''`)일 때는 절대 실행되지 않음
+    useEffect(() => {
+        if (!user || loading || selectedClientId) return;
+        setSaveStatus('저장 대기 중...');
         const timer = setTimeout(() => {
             fetch('/api/journals', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ date: currentDate, content: journal }),
-            }).then(() => {
-                const time = new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' });
-                setSaveStatus(`DB 저장 완료 (${time})`);
+            }).then((res) => {
+                if (res.ok) {
+                    const time = new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' });
+                    setSaveStatus(`DB 자동 저장됨 (${time})`);
+                }
             });
-        }, 800);
+        }, 1200);
 
         return () => clearTimeout(timer);
-    }, [journal, currentDate, user, loading]);
+    }, [journal, currentDate, user, loading, selectedClientId]);
 
     const changeDateBy = (days: number) => {
         const d = new Date(currentDate);
@@ -130,12 +182,14 @@ export default function MindJournalApp() {
             setAuthMode('login');
         } else {
             setUser(data.user);
+            if (data.user?.role === 'coach') fetchClients();
         }
     };
 
     const handleLogout = async () => {
         await fetch('/api/auth/me', { method: 'DELETE' });
         setUser(null);
+        setSelectedClientId('');
     };
 
     const fetchCodes = () => {
@@ -149,6 +203,8 @@ export default function MindJournalApp() {
         fetchCodes();
     };
 
+    const selectedClientInfo = clients.find((c) => c.id === selectedClientId);
+
     if (loading) {
         return (
             <div className="min-h-screen bg-[#ECEFE8] flex items-center justify-center text-xs text-[#405C50]">
@@ -157,7 +213,7 @@ export default function MindJournalApp() {
         );
     }
 
-    // ===================== [1] 로그인 & 회원가입 UI =====================
+    // ===================== [1] 로그인 & 가입 화면 =====================
     if (!user) {
         return (
             <main className="min-h-screen bg-[#ECEFE8] flex items-center justify-center p-4">
@@ -174,7 +230,6 @@ export default function MindJournalApp() {
                             : '가입 유형을 선택하고 등록해주세요.'}
                     </p>
 
-                    {/* 가입 시: 내담자 vs 코치 선택 탭 */}
                     {authMode === 'register' && (
                         <div className="flex bg-[#EBF1E8] p-1 rounded-xl mb-4 text-xs font-semibold">
                             <button
@@ -184,9 +239,7 @@ export default function MindJournalApp() {
                                     setAuthError('');
                                 }}
                                 className={`flex-1 py-1.5 rounded-lg transition ${
-                                    registerRole === 'client'
-                                        ? 'bg-white text-[#2C4F41] shadow-xs'
-                                        : 'text-[#698276] hover:text-[#2C4F41]'
+                                    registerRole === 'client' ? 'bg-white text-[#2C4F41] shadow-xs' : 'text-[#698276]'
                                 }`}
                             >
                                 내담자 가입
@@ -198,9 +251,7 @@ export default function MindJournalApp() {
                                     setAuthError('');
                                 }}
                                 className={`flex-1 py-1.5 rounded-lg transition ${
-                                    registerRole === 'coach'
-                                        ? 'bg-[#985338] text-white shadow-xs'
-                                        : 'text-[#698276] hover:text-[#985338]'
+                                    registerRole === 'coach' ? 'bg-[#985338] text-white shadow-xs' : 'text-[#698276]'
                                 }`}
                             >
                                 코치 가입
@@ -211,7 +262,6 @@ export default function MindJournalApp() {
                     <form onSubmit={handleAuthSubmit} className="space-y-3.5">
                         {authMode === 'register' && (
                             <>
-                                {/* 내담자: 초대 코드 입력 */}
                                 {registerRole === 'client' && (
                                     <div>
                                         <label className="block text-xs font-semibold text-[#405C50] mb-1">
@@ -228,7 +278,6 @@ export default function MindJournalApp() {
                                     </div>
                                 )}
 
-                                {/* 코치: 마스터 인증키 입력 */}
                                 {registerRole === 'coach' && (
                                     <div>
                                         <label className="block text-xs font-semibold text-[#985338] mb-1">
@@ -331,13 +380,57 @@ export default function MindJournalApp() {
                         <span className="text-lg">📖</span>
                         <div>
                             <div className="text-xs font-serif font-bold text-[#1E362C]">
-                                {user.name}님의 마인드 저널 ({user.role === 'coach' ? '코치' : '내담자'})
+                                {user.role === 'coach' ? (
+                                    <span>
+                                        코치 {user.name}의 코칭 공간
+                                        {selectedClientInfo && (
+                                            <span className="ml-1 text-[#985338]">
+                                                ({selectedClientInfo.name}님 일기 열람 중)
+                                            </span>
+                                        )}
+                                    </span>
+                                ) : (
+                                    <span>{user.name}님의 마인드 저널</span>
+                                )}
                             </div>
                             <div className="text-[11px] text-[#698276]">{saveStatus}</div>
                         </div>
                     </div>
 
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
+                        {/* 코치 전용: 내담자 선택 드롭다운 */}
+                        {user.role === 'coach' && (
+                            <select
+                                value={selectedClientId}
+                                onChange={(e) => setSelectedClientId(e.target.value)}
+                                className="text-xs px-2.5 py-1.5 rounded-xl border border-[#CCD8C9] bg-[#F4F7F2] font-semibold text-[#2C4F41] outline-none"
+                            >
+                                <option value="">👤 내 개인 저널 작성하기</option>
+                                <optgroup label="── 담당 내담자 선택 ──">
+                                    {clients.map((c) => (
+                                        <option key={c.id} value={c.id}>
+                                            👀 {c.name} ({c.journal_count}편 작성됨)
+                                        </option>
+                                    ))}
+                                </optgroup>
+                            </select>
+                        )}
+
+                        {/* 내담자 열람 모드가 아닐 때만 저장 버튼 노출 */}
+                        {!selectedClientId ? (
+                            <button
+                                onClick={handleManualSave}
+                                disabled={isSaving}
+                                className="text-xs px-3 py-1.5 rounded-xl bg-[#2C4F41] hover:bg-[#1E372D] text-white font-bold transition shadow-xs flex items-center gap-1"
+                            >
+                                <span>💾</span> {isSaving ? '저장 중...' : '저장하기'}
+                            </button>
+                        ) : (
+                            <span className="text-[11px] font-bold bg-[#FAF0EB] text-[#985338] px-2.5 py-1 rounded-xl border border-[#ECD5C8]">
+                                읽기 전용
+                            </span>
+                        )}
+
                         {/* 코치 전용: 코드 관리 */}
                         {user.role === 'coach' && (
                             <button
@@ -347,7 +440,7 @@ export default function MindJournalApp() {
                                 }}
                                 className="text-xs px-3 py-1.5 rounded-xl bg-[#985338] text-white font-medium hover:bg-[#80422B] transition shadow-xs"
                             >
-                                🔑 초대 코드 관리
+                                🔑 코드 관리
                             </button>
                         )}
 
@@ -377,22 +470,43 @@ export default function MindJournalApp() {
 
                         <button
                             onClick={() => setCurrentDate(todayStr)}
-                            className="text-xs px-2.5 py-1.5 rounded-xl border border-[#CCD8C9] bg-white hover:bg-[#F2F6F0] text-[#335345]"
+                            className="text-xs px-2 py-1.5 rounded-xl border border-[#CCD8C9] bg-white hover:bg-[#F2F6F0] text-[#335345]"
                         >
                             오늘
                         </button>
 
                         <button
                             onClick={handleLogout}
-                            className="text-xs px-3 py-1.5 rounded-xl border border-[#CCD8C9] bg-white hover:bg-[#F2F6F0] text-[#335345]"
+                            className="text-xs px-2.5 py-1.5 rounded-xl border border-[#CCD8C9] bg-white hover:bg-[#F2F6F0] text-[#335345]"
                         >
                             로그아웃
                         </button>
                     </div>
                 </header>
 
+                {/* 내담자 열람 중일 때 상단 알림 배너 */}
+                {selectedClientInfo && (
+                    <div className="bg-[#FAF0EB] border border-[#ECD5C8] rounded-2xl px-5 py-2.5 flex items-center justify-between text-xs text-[#80422B]">
+                        <div className="flex items-center gap-2">
+                            <span className="text-base">📌</span>
+                            <span>
+                                현재 <strong>{selectedClientInfo.name}</strong>님의 <strong>{currentDate}</strong>{' '}
+                                일기를 열람 중입니다. (수정 불가 / 읽기 전용)
+                            </span>
+                        </div>
+                        <button
+                            onClick={() => setSelectedClientId('')}
+                            className="font-bold underline hover:text-black text-[11px]"
+                        >
+                            내 저널로 돌아가기
+                        </button>
+                    </div>
+                )}
+
                 {/* 저널 본지 */}
-                <div className="bg-[#FAFBF9] border border-[#D0DACE] rounded-3xl p-6 sm:p-9 shadow-md space-y-6">
+                <div
+                    className={`bg-[#FAFBF9] border border-[#D0DACE] rounded-3xl p-6 sm:p-9 shadow-md space-y-6 ${selectedClientId ? 'select-text' : ''}`}
+                >
                     {/* 헤더 */}
                     <div className="grid grid-cols-1 sm:grid-cols-2 border-b border-[#DCE4DA] pb-3 gap-3">
                         <div className="flex items-center gap-3">
@@ -403,6 +517,7 @@ export default function MindJournalApp() {
                             <span className="text-xs font-serif font-bold text-[#3E5C4E] w-16">수면 시간</span>
                             <input
                                 type="text"
+                                readOnly={!!selectedClientId}
                                 placeholder="예: 7시간 30분 / 깊은 잠"
                                 value={journal.sleepHours}
                                 onChange={(e) => updateField('sleepHours', e.target.value)}
@@ -425,6 +540,7 @@ export default function MindJournalApp() {
                                         <button
                                             key={v}
                                             type="button"
+                                            disabled={!!selectedClientId}
                                             onClick={() => updateField('startMood', v)}
                                             className={`w-6 h-6 rounded-full text-[11px] font-bold transition ${
                                                 journal.startMood === v
@@ -445,6 +561,7 @@ export default function MindJournalApp() {
                                         <button
                                             key={v}
                                             type="button"
+                                            disabled={!!selectedClientId}
                                             onClick={() => updateField('startEnergy', v)}
                                             className={`w-6 h-6 rounded-full text-[11px] font-bold transition ${
                                                 journal.startEnergy === v
@@ -462,10 +579,15 @@ export default function MindJournalApp() {
                                 <span className="text-xs text-[#4E6B5E] whitespace-nowrap pt-1">이유 :</span>
                                 <textarea
                                     rows={2}
-                                    placeholder="오늘 시작 기분의 이유를 적어보세요"
+                                    readOnly={!!selectedClientId}
+                                    placeholder={
+                                        selectedClientId
+                                            ? '작성된 내용이 없습니다.'
+                                            : '오늘 시작 기분의 이유를 적어보세요'
+                                    }
                                     value={journal.startReason}
                                     onChange={(e) => updateField('startReason', e.target.value)}
-                                    className="flex-1 text-xs p-2 rounded-xl bg-white border border-[#CCD8C9] outline-none focus:border-[#2C4F41] resize-none"
+                                    className="flex-1 text-xs p-2 rounded-xl bg-white border border-[#CCD8C9] outline-none resize-none"
                                 />
                             </div>
                         </div>
@@ -482,6 +604,7 @@ export default function MindJournalApp() {
                                         <button
                                             key={v}
                                             type="button"
+                                            disabled={!!selectedClientId}
                                             onClick={() => updateField('endMood', v)}
                                             className={`w-6 h-6 rounded-full text-[11px] font-bold transition ${
                                                 journal.endMood === v
@@ -502,6 +625,7 @@ export default function MindJournalApp() {
                                         <button
                                             key={v}
                                             type="button"
+                                            disabled={!!selectedClientId}
                                             onClick={() => updateField('endPeace', v)}
                                             className={`w-6 h-6 rounded-full text-[11px] font-bold transition ${
                                                 journal.endPeace === v
@@ -519,10 +643,15 @@ export default function MindJournalApp() {
                                 <span className="text-xs text-[#4E6B5E] whitespace-nowrap pt-1">이유 :</span>
                                 <textarea
                                     rows={2}
-                                    placeholder="하루를 마감하며 든 생각이나 이유"
+                                    readOnly={!!selectedClientId}
+                                    placeholder={
+                                        selectedClientId
+                                            ? '작성된 내용이 없습니다.'
+                                            : '하루를 마감하며 든 생각이나 이유'
+                                    }
                                     value={journal.endReason}
                                     onChange={(e) => updateField('endReason', e.target.value)}
-                                    className="flex-1 text-xs p-2 rounded-xl bg-white border border-[#CCD8C9] outline-none focus:border-[#2C4F41] resize-none"
+                                    className="flex-1 text-xs p-2 rounded-xl bg-white border border-[#CCD8C9] outline-none resize-none"
                                 />
                             </div>
                         </div>
@@ -544,6 +673,7 @@ export default function MindJournalApp() {
                                 </span>
                                 <input
                                     type="text"
+                                    readOnly={!!selectedClientId}
                                     value={(journal as any)[item.key]}
                                     onChange={(e) => updateField(item.key as keyof JournalEntry, e.target.value)}
                                     className="flex-1 text-xs border-b border-[#D2DDD0] bg-transparent py-1 outline-none focus:border-[#2C4F41]"
@@ -559,10 +689,15 @@ export default function MindJournalApp() {
                         </span>
                         <textarea
                             rows={3}
+                            readOnly={!!selectedClientId}
                             value={journal.treasuredNight}
                             onChange={(e) => updateField('treasuredNight', e.target.value)}
-                            placeholder="오늘 밤, 조용히 마음에 품고 잠들고 싶은 장면이나 소중한 생각"
-                            className="w-full text-xs p-3 rounded-2xl border border-[#CCD8C8] bg-white outline-none focus:border-[#2C4F41] resize-none leading-relaxed"
+                            placeholder={
+                                selectedClientId
+                                    ? '작성된 내용이 없습니다.'
+                                    : '오늘 밤, 조용히 마음에 품고 잠들고 싶은 장면이나 소중한 생각'
+                            }
+                            className="w-full text-xs p-3 rounded-2xl border border-[#CCD8C8] bg-white outline-none resize-none leading-relaxed"
                         />
                     </div>
 
@@ -572,44 +707,42 @@ export default function MindJournalApp() {
                             <div className="text-xs font-serif font-bold text-[#2C4C3E] border-b border-[#D4DFD1] pb-1">
                                 나를 위해 감사한 일
                             </div>
-                            <div className="space-y-1.5">
-                                {journal.gratitudes.map((val, idx) => (
-                                    <div key={idx} className="flex items-center gap-2">
-                                        <span className="text-xs font-serif text-[#557365] w-4 text-center">
-                                            {idx + 1}.
-                                        </span>
-                                        <input
-                                            type="text"
-                                            value={val}
-                                            onChange={(e) => handleListChange('gratitudes', idx, e.target.value)}
-                                            placeholder={`감사 ${idx + 1}`}
-                                            className="flex-1 text-xs border-b border-[#D7E2D5] bg-transparent py-0.5 outline-none focus:border-[#2C4F41]"
-                                        />
-                                    </div>
-                                ))}
-                            </div>
+                            {journal.gratitudes.map((val, idx) => (
+                                <div key={idx} className="flex items-center gap-2">
+                                    <span className="text-xs font-serif text-[#557365] w-4 text-center">
+                                        {idx + 1}.
+                                    </span>
+                                    <input
+                                        type="text"
+                                        readOnly={!!selectedClientId}
+                                        value={val}
+                                        onChange={(e) => handleListChange('gratitudes', idx, e.target.value)}
+                                        placeholder={`감사 ${idx + 1}`}
+                                        className="flex-1 text-xs border-b border-[#D7E2D5] bg-transparent py-0.5 outline-none"
+                                    />
+                                </div>
+                            ))}
                         </div>
 
                         <div className="space-y-2">
                             <div className="text-xs font-serif font-bold text-[#9E5235] border-b border-[#E8D4CC] pb-1">
                                 오늘 하루, 나에게 해 준 칭찬
                             </div>
-                            <div className="space-y-1.5">
-                                {journal.praises.map((val, idx) => (
-                                    <div key={idx} className="flex items-center gap-2">
-                                        <span className="text-xs font-serif text-[#A96347] w-4 text-center">
-                                            {idx + 1}.
-                                        </span>
-                                        <input
-                                            type="text"
-                                            value={val}
-                                            onChange={(e) => handleListChange('praises', idx, e.target.value)}
-                                            placeholder={`칭찬 ${idx + 1}`}
-                                            className="flex-1 text-xs border-b border-[#E8D4CC] bg-transparent py-0.5 outline-none focus:border-[#C26241]"
-                                        />
-                                    </div>
-                                ))}
-                            </div>
+                            {journal.praises.map((val, idx) => (
+                                <div key={idx} className="flex items-center gap-2">
+                                    <span className="text-xs font-serif text-[#A96347] w-4 text-center">
+                                        {idx + 1}.
+                                    </span>
+                                    <input
+                                        type="text"
+                                        readOnly={!!selectedClientId}
+                                        value={val}
+                                        onChange={(e) => handleListChange('praises', idx, e.target.value)}
+                                        placeholder={`칭찬 ${idx + 1}`}
+                                        className="flex-1 text-xs border-b border-[#E8D4CC] bg-transparent py-0.5 outline-none"
+                                    />
+                                </div>
+                            ))}
                         </div>
                     </div>
 
@@ -621,10 +754,11 @@ export default function MindJournalApp() {
                             </span>
                             <textarea
                                 rows={2}
+                                readOnly={!!selectedClientId}
                                 value={journal.selfEncouragement}
                                 onChange={(e) => updateField('selfEncouragement', e.target.value)}
-                                placeholder="나에게 전하는 다정한 격려"
-                                className="w-full text-xs p-2.5 rounded-xl border border-[#CCD8C8] bg-white outline-none focus:border-[#2C4F41] resize-none"
+                                placeholder={selectedClientId ? '작성된 내용이 없습니다.' : '나에게 전하는 다정한 격려'}
+                                className="w-full text-xs p-2.5 rounded-xl border border-[#CCD8C8] bg-white outline-none resize-none"
                             />
                         </div>
                         <div>
@@ -633,10 +767,13 @@ export default function MindJournalApp() {
                             </span>
                             <textarea
                                 rows={2}
+                                readOnly={!!selectedClientId}
                                 value={journal.tomorrowExpectation}
                                 onChange={(e) => updateField('tomorrowExpectation', e.target.value)}
-                                placeholder="내일을 기다리게 만드는 작은 설렘"
-                                className="w-full text-xs p-2.5 rounded-xl border border-[#CCD8C8] bg-white outline-none focus:border-[#2C4F41] resize-none"
+                                placeholder={
+                                    selectedClientId ? '작성된 내용이 없습니다.' : '내일을 기다리게 만드는 작은 설렘'
+                                }
+                                className="w-full text-xs p-2.5 rounded-xl border border-[#CCD8C8] bg-white outline-none resize-none"
                             />
                         </div>
                     </div>
@@ -650,11 +787,12 @@ export default function MindJournalApp() {
                                     <button
                                         key={score}
                                         type="button"
+                                        disabled={!!selectedClientId}
                                         onClick={() => updateField('dayRating', score)}
                                         className={`w-6 h-6 rounded-full text-[11px] font-bold transition flex items-center justify-center ${
                                             journal.dayRating === score
                                                 ? 'bg-[#C26241] text-white shadow-xs scale-105'
-                                                : 'bg-white border border-[#CBD7C8] text-[#5A7568] hover:border-[#C26241]'
+                                                : 'bg-white border border-[#CBD7C8] text-[#5A7568]'
                                         }`}
                                     >
                                         {score}
@@ -663,11 +801,26 @@ export default function MindJournalApp() {
                             </div>
                         </div>
 
-                        <div className="text-[11px] font-serif text-[#81998D]">by mindful coach</div>
+                        {!selectedClientId && (
+                            <button
+                                onClick={handleManualSave}
+                                disabled={isSaving}
+                                className="px-5 py-2 bg-[#2C4F41] hover:bg-[#1E372D] text-white text-xs font-bold rounded-xl transition shadow-xs flex items-center gap-1.5"
+                            >
+                                <span>💾</span> {isSaving ? '저장 중...' : '오늘 저널 기록 저장하기'}
+                            </button>
+                        )}
                     </div>
                 </div>
 
-                {/* ===================== [3] 코치 전용 초대 코드 관리 모달 ===================== */}
+                {/* 저장 토스트 */}
+                {showSaveToast && (
+                    <div className="fixed bottom-6 right-6 bg-[#1F392F] text-white px-4 py-2.5 rounded-2xl shadow-xl text-xs flex items-center gap-2 animate-bounce z-50">
+                        <span>✅</span> 저널이 데이터베이스에 저장되었습니다!
+                    </div>
+                )}
+
+                {/* 코치 모달 */}
                 {showCoachModal && (
                     <div className="fixed inset-0 bg-black/40 backdrop-blur-xs flex items-center justify-center p-4 z-50">
                         <div className="max-w-md w-full bg-white rounded-3xl p-6 shadow-xl space-y-4">
